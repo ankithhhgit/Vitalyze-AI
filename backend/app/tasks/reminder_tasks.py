@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 @celery.task
 def send_daily_reminder_task(user_name: str, phone_number: str, medicine_name: str):
     """Celery task to send a daily medicine reminder via WhatsApp."""
-    logger.info(f"Executing daily reminder for {user_name} for medicine {medicine_name}.")
+    logger.info("Executing daily reminder task.")
     
     template_name = "medication_reminder_v3"
     
@@ -19,16 +19,16 @@ def send_daily_reminder_task(user_name: str, phone_number: str, medicine_name: s
     success = whatsapp_service.send_template_message(phone_number, template_name, template_params)
     
     if success:
-        return f"Daily reminder sent to {user_name}."
+        return "Daily reminder sent."
     else:
-        return f"Failed to send daily reminder to {user_name}."
+        return "Daily reminder failed."
     
 
 
 @celery.task
 def send_refill_reminder_task(user_name: str, phone_number: str, medicine_name: str):
     """Celery task to send a refill reminder via WhatsApp."""
-    logger.info(f"Executing refill reminder for {user_name} for medicine {medicine_name}.")
+    logger.info("Executing refill reminder task.")
     
     template_name = "refill_reminder_v1"
 
@@ -38,6 +38,6 @@ def send_refill_reminder_task(user_name: str, phone_number: str, medicine_name: 
     success = whatsapp_service.send_template_message(phone_number, template_name, template_params)
     
     if success:
-        return f"Refill reminder sent to {user_name}."
+        return "Refill reminder sent."
     else:
-        return f"Failed to send refill reminder to {user_name}."
+        return "Refill reminder failed."

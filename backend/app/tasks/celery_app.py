@@ -1,6 +1,7 @@
 import ssl
 import asyncio
 import logging
+from urllib.parse import urlsplit
 from celery import Celery
 from celery.schedules import crontab
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -13,8 +14,19 @@ logger = logging.getLogger(__name__)
 
 # Force SSL settings for Upstash/Redis
 ssl_options = {
-    'ssl_cert_reqs': ssl.CERT_NONE
+    # Require a trusted server certificate for managed Redis TLS connections.
+    'ssl_cert_reqs': ssl.CERT_REQUIRED
 }
+
+
+def redis_ssl_settings(redis_url: str) -> dict:
+    """Return Celery TLS options only for TLS-enabled Redis URLs."""
+    if urlsplit(redis_url).scheme == "rediss":
+        return {
+            "broker_use_ssl": ssl_options,
+            "redis_backend_use_ssl": ssl_options,
+        }
+    return {}
 
 celery = Celery(
     "app.tasks",
@@ -29,10 +41,13 @@ celery.conf.update(
     result_serializer="json",
     timezone="Asia/Kolkata",
     enable_utc=True,
-    broker_use_ssl=ssl_options,
-    redis_backend_use_ssl=ssl_options,
     broker_connection_retry_on_startup=True,
 )
+
+# Celery rejects explicit SSL options with a plain redis:// URL. Keep TLS
+# verification behavior for managed rediss:// brokers while allowing local
+# loopback Redis used for development and tests.
+celery.conf.update(**redis_ssl_settings(settings.REDIS_URL))
 
 
 TIMING_TO_CRONTAB = {

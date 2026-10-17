@@ -4,6 +4,7 @@ import logging
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+REQUEST_TIMEOUT_SECONDS = 10
 
 def send_template_message(
     phone_number: str, 
@@ -45,14 +46,16 @@ def send_template_message(
         ]
 
     try:
-        response = requests.post(api_url, headers=headers, json=payload)
+        response = requests.post(
+            api_url,
+            headers=headers,
+            json=payload,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
-        
-        logger.info(f"WhatsApp message sent to {phone_number}. Response: {response.json()}")
+        logger.info("WhatsApp template message sent successfully.")
         return True
-    except requests.exceptions.RequestException as e:
-        # Log the response text to see the exact error from Meta
-        error_msg = response.text if response else str(e)
-        logger.error(f"Failed to send WhatsApp message to {phone_number}: {e}")
-        logger.error(f"Meta API Error Details: {error_msg}")
+    except requests.exceptions.RequestException as exc:
+        # Provider errors may echo recipient data, message content, or credentials.
+        logger.error("WhatsApp template message failed (%s).", type(exc).__name__)
         return False
