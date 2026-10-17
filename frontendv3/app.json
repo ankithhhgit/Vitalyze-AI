@@ -41,7 +41,9 @@
         {
           "locationWhenInUsePermission": "Allow Vitalyze to access your location to find nearby pharmacies."
         }
-      ]
+      ],
+      "expo-asset",
+      "expo-font"
     ]
   }
 }
