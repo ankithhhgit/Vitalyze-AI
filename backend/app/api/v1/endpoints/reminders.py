@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Literal
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from celery.schedules import crontab
@@ -21,10 +21,24 @@ class DailyReminderCreate(BaseModel):
     medicine_name: str
     timings: List[Literal["morning", "afternoon", "evening"]]
 
+    @field_validator("medicine_name")
+    @classmethod
+    def medicine_name_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("medicine_name must not be blank")
+        return value
+
 class RefillReminderCreate(BaseModel):
     medicine_name: str
     initial_quantity: int = Field(..., gt=0)
     frequency_per_day: int = Field(..., gt=0)
+
+    @field_validator("medicine_name")
+    @classmethod
+    def medicine_name_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("medicine_name must not be blank")
+        return value
 
 TIMING_TO_CRONTAB = {
     "morning": crontab(hour=8, minute=0),

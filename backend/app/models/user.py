@@ -68,3 +68,16 @@ class UserInDB(UserBase):
     class Config:
         json_encoders = {ObjectId: str}
         arbitrary_types_allowed = True
+
+
+class UserPublic(UserBase):
+    """Fields that may be returned when a user reads their own profile."""
+
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    created_at: datetime = Field(default_factory=datetime.now)
+    daily_reminders: List[DailyReminder] = []
+    refill_reminders: List[RefillReminder] = []
+
+    class Config:
+        json_encoders = {ObjectId: str}
+        arbitrary_types_allowed = True

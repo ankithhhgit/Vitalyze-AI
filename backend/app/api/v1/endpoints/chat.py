@@ -1,5 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from pydantic import field_validator
+import logging
 import vertexai
 from vertexai.generative_models import GenerativeModel
 from google.oauth2 import service_account  # <--- IMPORT THIS
@@ -7,9 +9,17 @@ from app.core.config import settings
 import os
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 class ChatRequest(BaseModel):
     message: str
+
+    @field_validator("message")
+    @classmethod
+    def message_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("message must not be blank")
+        return value
 
 def get_chat_model():
     """
@@ -56,11 +66,10 @@ async def chat_with_medical_assistant(request: ChatRequest):
         response = model.generate_content(full_prompt)
         return {"response": response.text}
         
-    except FileNotFoundError as fnf:
-        # Specific error if JSON is missing
-        print(f"Error: {fnf}")
-        raise HTTPException(status_code=500, detail="Server Configuration Error: GCP Credentials file missing.")
-        
-    except Exception as e:
-        print(f"Chat Error: {e}") # Print to console for debugging
-        raise HTTPException(status_code=500, detail=f"AI Service Error: {str(e)}")
+    except Exception as exc:
+        # Exception messages and tracebacks can contain credentials or provider URLs.
+        logger.error("Chat provider request failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail="The healthcare assistant is temporarily unavailable.",
+        ) from None

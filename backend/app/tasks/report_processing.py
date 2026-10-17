@@ -216,7 +216,7 @@ def task_run_ai_analysis(self, extraction_result: Union[Dict, str], user_id: str
         text_to_analyze = str(extraction_result)
 
     if not text_to_analyze:
-        return {"error": "No text provided"}
+        raise RuntimeError("Report extraction produced no text")
 
     # --- STEP 1: Extract Clean Data using Gemini ---
     # We replaced the Regex/Google NLP with this single intelligent call.
@@ -227,8 +227,8 @@ def task_run_ai_analysis(self, extraction_result: Union[Dict, str], user_id: str
     
     # 3. Save to DB
     async def save_to_db():
+        client = AsyncIOMotorClient(settings.MONGO_URI)
         try:
-            client = AsyncIOMotorClient(settings.MONGO_URI)
             db = client[settings.MONGO_DB_NAME]
             
             report_in = ReportCreate(
@@ -242,19 +242,20 @@ def task_run_ai_analysis(self, extraction_result: Union[Dict, str], user_id: str
             )
             
             await db["reports"].insert_one(report_in.model_dump(by_alias=True, exclude=["id"]))
-            client.close()
             return True
-        except Exception as db_err:
-            logger.error(f"Database Save Failed: {db_err}")
-            return False
+        finally:
+            client.close()
 
+    loop = asyncio.new_event_loop()
     try:
-        loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(save_to_db())
+    except Exception:
+        logger.exception("Failed to persist processed report")
+        raise RuntimeError("Report processing failed") from None
+    finally:
         loop.close()
-    except Exception as e:
-        logger.error(f"Async Loop Failed: {e}")
+        asyncio.set_event_loop(None)
 
     # Return structure matching what your frontend expects
     return {
