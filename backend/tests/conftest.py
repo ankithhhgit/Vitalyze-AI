@@ -20,10 +20,18 @@ _TEST_SETTINGS = {
     "WHATSAPP_ACCESS_TOKEN": "test-only-placeholder-token",
     "WHATSAPP_PHONE_NUMBER_ID": "test-only-placeholder-phone-id",
     "WHATSAPP_VERIFY_TOKEN": "test-only-placeholder-verify-token",
-    "GOOGLE_MAPS_API_KEY": "",
+    "GEOAPIFY_API_KEY": "",
     "GCP_PROJECT_ID": "test-only-placeholder-project",
     "GCP_LOCATION": "us-central1",
     "GOOGLE_APPLICATION_CREDENTIALS": "./test-only-missing-service-account.json",
+    "GEMINI_API_KEY": "",
+    "GEMINI_MODEL": "gemini-3.5-flash-lite",
+    "REPORT_ANALYSIS_MODE": "local",
+    "TELEGRAM_BOT_TOKEN": "",
+    "TELEGRAM_BOT_USERNAME": "",
+    "TELEGRAM_WEBHOOK_SECRET": "",
+    "TELEGRAM_SEND_ENABLED": "false",
+    "TELEGRAM_LINK_CODE_TTL_SECONDS": "900",
 }
 for _name, _value in _TEST_SETTINGS.items():
     os.environ[_name] = _value
@@ -85,16 +93,110 @@ class FakeReportJobsCollection:
         return SimpleNamespace(inserted_id=document["_id"])
 
 
+class FakeUsersCollection:
+    def __init__(self):
+        self.update_query = None
+        self.update_operation = None
+        self.documents = []
+
+    async def update_one(self, query, update):
+        self.update_query = query
+        self.update_operation = update
+        modified = 0 if "$pull" in update else 1
+        matches = [
+            document
+            for document in self.documents
+            if all(document.get(key) == value for key, value in query.items())
+        ]
+        for document in matches:
+            document.update(update.get("$set", {}))
+            for key in update.get("$unset", {}):
+                document.pop(key, None)
+        if matches:
+            modified = len(matches)
+        return SimpleNamespace(matched_count=modified, modified_count=modified)
+
+
+class FakeReminderDeliveriesCollection:
+    def __init__(self, documents=None):
+        self.documents = [dict(document) for document in (documents or [])]
+        self.last_query = None
+        self.last_update = None
+
+    async def update_one(self, query, update):
+        self.last_query = query
+        self.last_update = update
+        matches = [
+            document
+            for document in self.documents
+            if all(document.get(key) == value for key, value in query.items())
+        ]
+        set_values = update.get("$set", {})
+        for document in matches:
+            document.update(set_values)
+        return SimpleNamespace(matched_count=len(matches), modified_count=len(matches))
+
+
+class FakeTelegramLinkCodesCollection:
+    """In-memory stand-in for the one-time Telegram account-linking codes."""
+
+    def __init__(self):
+        self.documents = []
+        self.indexes = []
+
+    async def create_index(self, key, unique=False):
+        self.indexes.append((key, unique))
+        return key
+
+    @staticmethod
+    def _matches(document, query):
+        for key, expected in query.items():
+            actual = document.get(key)
+            if isinstance(expected, dict) and "$gt" in expected:
+                bound = expected["$gt"]
+                if actual is None or not (actual > bound):
+                    return False
+            elif actual != expected:
+                return False
+        return True
+
+    async def insert_one(self, document):
+        self.documents.append(dict(document))
+        return SimpleNamespace(inserted_id=document.get("_id"))
+
+    async def update_many(self, query, update):
+        matched = [doc for doc in self.documents if self._matches(doc, query)]
+        for document in matched:
+            document.update(update.get("$set", {}))
+        return SimpleNamespace(matched_count=len(matched), modified_count=len(matched))
+
+    async def find_one_and_update(self, query, update):
+        for document in self.documents:
+            if self._matches(document, query):
+                document.update(update.get("$set", {}))
+                return dict(document)
+        return None
+
+
 class FakeDatabase:
     def __init__(self, reports=None):
         self.reports = FakeReportsCollection(reports)
         self.report_jobs = FakeReportJobsCollection()
+        self.users = FakeUsersCollection()
+        self.reminder_deliveries = FakeReminderDeliveriesCollection()
+        self.telegram_link_codes = FakeTelegramLinkCodesCollection()
 
     def __getitem__(self, collection_name):
         if collection_name == "reports":
             return self.reports
         if collection_name == "report_jobs":
             return self.report_jobs
+        if collection_name == "users":
+            return self.users
+        if collection_name == "reminder_deliveries":
+            return self.reminder_deliveries
+        if collection_name == "telegram_link_codes":
+            return self.telegram_link_codes
         raise AssertionError(f"Unexpected test collection access: {collection_name}")
 
 

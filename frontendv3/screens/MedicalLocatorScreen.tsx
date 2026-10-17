@@ -71,11 +71,16 @@ export default function MedicalLocatorScreen() {
 
       setStores(resultsWithDistance);
     } catch (err: any) {
-      console.error('API Fetch Error:', err);
-      if (err.response && err.response.status === 503) {
-        setError('Maps Service Unavailable (Server Config Error).');
+      if (err.response?.status === 503) {
+        setError('Pharmacy search is not configured. The backend needs a pharmacy search API key.');
+      } else if (err.response?.status === 502) {
+        setError('The pharmacy provider is temporarily unavailable. Please try again later.');
+      } else if (err.response?.status === 504) {
+        setError('The pharmacy provider timed out. Please try again.');
+      } else if (err.response?.status === 401) {
+        setError('Your session expired. Sign in again to continue.');
       } else {
-        setError('Could not fetch pharmacies. Ensure you are logged in.');
+        setError('Could not load pharmacies. Check your connection and try again.');
       }
       setStores([]);
     } finally {
@@ -117,9 +122,19 @@ export default function MedicalLocatorScreen() {
     }
   }, [location, radius]);
 
-  const handleViewMap = (placeId: string) => {
-    const url = `https://www.google.com/maps/search/?api=1&query=Google&query_place_id=${placeId}`;
-    Linking.openURL(url);
+  const handleViewMap = (store: Store) => {
+    // Geoapify place IDs are not Google place IDs, so link by coordinates.
+    const { lat, lng } = store.geometry;
+    const url = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+    Linking.openURL(url).catch(() => setError('Could not open Google Maps on this device.'));
+  };
+
+  const openNearbyPharmaciesInMaps = () => {
+    const query = encodeURIComponent(
+      location ? `pharmacies near ${location.lat},${location.lng}` : 'pharmacies near me'
+    );
+    Linking.openURL(`https://www.google.com/maps/search/?api=1&query=${query}`)
+      .catch(() => setError('Could not open Google Maps on this device.'));
   };
 
   const renderStoreCard = ({ item }: { item: Store }) => (
@@ -145,7 +160,7 @@ export default function MedicalLocatorScreen() {
         </View>
       </View>
 
-      <TouchableOpacity style={styles.mapButton} onPress={() => handleViewMap(item.place_id)}>
+      <TouchableOpacity style={styles.mapButton} onPress={() => handleViewMap(item)}>
         <Text style={styles.mapButtonText}>View on Map</Text>
         <Ionicons name="open-outline" size={16} color={COLORS.primary} />
       </TouchableOpacity>
@@ -163,6 +178,10 @@ export default function MedicalLocatorScreen() {
         <View style={styles.errorCard}>
           <Ionicons name="alert-circle" size={24} color={COLORS.error} />
           <Text style={styles.errorText}>{error}</Text>
+          <Text style={styles.errorText}>This opens a separate Google Maps search; Vitalyze has not retrieved pharmacy results.</Text>
+          <TouchableOpacity style={styles.mapButton} onPress={openNearbyPharmaciesInMaps}>
+            <Text style={styles.mapButtonText}>Open nearby search in Google Maps</Text>
+          </TouchableOpacity>
         </View>
       )}
 
@@ -189,6 +208,13 @@ export default function MedicalLocatorScreen() {
               <Picker.Item label="Within 10 km" value={10000} />
             </Picker>
           </View>
+          <Text style={styles.radiusHint}>
+            {loading
+              ? 'Radius selection is paused while search is loading.'
+              : error
+                ? 'Radius changes apply when the pharmacy search provider is available.'
+                : 'Choose how far to search for pharmacies.'}
+          </Text>
         </View>
       )}
 
@@ -245,8 +271,8 @@ const styles = StyleSheet.create({
     marginTop: moderateScale(4),
   },
   errorCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: 'column',
+    alignItems: 'stretch',
     gap: 10,
     backgroundColor: 'rgba(255, 123, 114, 0.1)',
     borderRadius: SIZES.radius / 2,
@@ -283,6 +309,11 @@ const styles = StyleSheet.create({
   picker: {
     color: COLORS.text,
     height: 50,
+  },
+  radiusHint: {
+    color: COLORS.textSecondary,
+    fontSize: moderateScale(SIZES.caption),
+    marginTop: moderateScale(6),
   },
   loadingContainer: {
     flex: 1,

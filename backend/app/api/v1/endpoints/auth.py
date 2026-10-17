@@ -9,7 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 # --- Internal Imports ---
 from app.db.mongodb import get_database
 from app.crud import crud_user
-from app.models.user import UserCreate, UserInDB, Token, TokenData
+from app.models.user import UserCreate, UserInDB, UserPublic, Token, TokenData
 from app.core import security
 from app.core.config import settings
 
@@ -62,7 +62,7 @@ async def get_current_active_user(
 
 
 
-@router.post("/register", response_model=UserInDB, status_code=201)
+@router.post("/register", response_model=UserPublic, status_code=201)
 async def register_new_user(
     *,
     db: AsyncIOMotorDatabase = Depends(get_database),
@@ -110,3 +110,9 @@ async def login_for_access_token(
     )
     
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.get("/me", response_model=UserPublic)
+async def read_current_user(current_user: UserInDB = Depends(get_current_user)):
+    """Return the authenticated user's safe public profile for session restoration."""
+    return current_user

@@ -9,16 +9,20 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as DocumentPicker from 'expo-document-picker';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import Markdown from 'react-native-markdown-display';
 import { Ionicons } from '@expo/vector-icons';
 import api from '../services/api';
+import { formatApiError } from '../services/api';
 import { COLORS, SIZES, moderateScale } from '../constants/theme';
 
 type StatusType = 'idle' | 'uploading' | 'analyzing' | 'completed' | 'error';
 
 interface AnalysisResult {
-  simple_summary: string;
+  simple_summary?: string;
+  analysis_mode?: 'ai_analysis' | 'local_extraction_preview';
+  report_id?: string;
+  raw_text?: string;
   vital_indicators?: Array<{ Indicator: string; Value: string }>;
   structured_entities?: Array<{ Description: string; Confidence: number }>;
 }
@@ -27,6 +31,9 @@ export default function ReportAnalyserScreen() {
   const [selectedFile, setSelectedFile] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [status, setStatus] = useState<StatusType>('idle');
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [extractedText, setExtractedText] = useState('');
+  const [textPreviewLoading, setTextPreviewLoading] = useState(false);
+  const [textPreviewMessage, setTextPreviewMessage] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
 
   const handleFilePick = async () => {
@@ -42,6 +49,8 @@ export default function ReportAnalyserScreen() {
         setErrorMsg('');
         setStatus('idle');
         setAnalysisResult(null);
+        setExtractedText('');
+        setTextPreviewMessage('');
       }
     } catch (err) {
       console.error('File pick error:', err);
@@ -49,60 +58,107 @@ export default function ReportAnalyserScreen() {
     }
   };
 
-  const pollTaskStatus = (taskId: string) => {
-    const intervalId = setInterval(async () => {
+  const pollTaskStatus = async (taskId: string, filename: string, uploadStartedAt: number) => {
+    setStatus('analyzing');
+    for (let attempt = 0; attempt < 90; attempt += 1) {
       try {
         const response = await api.get(`/reports/status/${taskId}`);
         const taskState = response.data.status;
 
         if (taskState === 'SUCCESS') {
-          clearInterval(intervalId);
-          setAnalysisResult(response.data.result);
+          const result: AnalysisResult = response.data.result || {};
+          let text = typeof result.raw_text === 'string' ? result.raw_text : '';
+          if (!text) {
+            setTextPreviewLoading(true);
+            try {
+              const history = await api.get('/reports/history');
+              const reports = Array.isArray(history.data) ? history.data : [];
+              const savedReport = reports.find((item: any) => {
+                const idMatches = result.report_id != null
+                  && String(item?.id ?? item?._id) === String(result.report_id);
+                const uploadedAt = new Date(item?.upload_date).getTime();
+                const recentMatchingFile = item?.filename === filename
+                  && Number.isFinite(uploadedAt)
+                  && uploadedAt >= uploadStartedAt - 2 * 60 * 1000;
+                return idMatches || recentMatchingFile;
+              });
+              text = typeof savedReport?.raw_text === 'string' ? savedReport.raw_text : '';
+              if (!text) {
+                setTextPreviewMessage('The report task completed, but extracted text was not present in the saved history record. AI summary availability is separate from PDF text extraction.');
+              }
+            } catch (err) {
+              setTextPreviewMessage(formatApiError(err, 'The report task completed, but saved PDF text could not be loaded.'));
+            } finally {
+              setTextPreviewLoading(false);
+            }
+          }
+          setExtractedText(text);
+          if (text) setTextPreviewMessage('');
+          setAnalysisResult(result);
           setStatus('completed');
+          return;
         } else if (taskState === 'FAILURE') {
-          clearInterval(intervalId);
-          setErrorMsg('Analysis failed. ' + (response.data.error || 'Unknown error'));
+          setErrorMsg(response.data.error || 'Report processing failed. The report was not saved.');
           setStatus('error');
+          return;
         }
       } catch (err) {
-        clearInterval(intervalId);
-        console.error('Polling Error:', err);
-        setErrorMsg('Lost connection to server while checking status.');
+        setErrorMsg(formatApiError(err, 'Lost connection to the server while checking status.'));
         setStatus('error');
+        return;
       }
-    }, 2000);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    setErrorMsg('Report processing timed out. Check Trends or report history before retrying.');
+    setStatus('error');
   };
 
   const handleUpload = async () => {
     if (!selectedFile) return;
+    const file = selectedFile;
+    const uploadStartedAt = Date.now();
     setStatus('uploading');
     setErrorMsg('');
+    setExtractedText('');
+    setTextPreviewMessage('');
 
     try {
-      const fileUri = selectedFile.uri;
+      const fileUri = file.uri;
+      if (!fileUri || !file.name) {
+        throw new Error('The selected PDF is missing its file location or filename. Please select it again.');
+      }
+      if (!file.name.toLowerCase().endsWith('.pdf') || (file.mimeType && file.mimeType !== 'application/pdf')) {
+        throw new Error('Choose a PDF document to extract text.');
+      }
+      if (file.size != null && file.size > 15 * 1024 * 1024) {
+        throw new Error('PDF is too large. Maximum size is 15 MB.');
+      }
       const fileInfo = await FileSystem.getInfoAsync(fileUri);
       
       if (!fileInfo.exists) {
-        throw new Error('File not found');
+        throw new Error('The selected PDF is no longer available. Please select it again.');
+      }
+      if (fileInfo.size != null && fileInfo.size > 15 * 1024 * 1024) {
+        throw new Error('PDF is too large. Maximum size is 15 MB.');
       }
 
       const formData = new FormData();
       formData.append('file', {
         uri: fileUri,
-        name: selectedFile.name,
-        type: 'application/pdf',
+        name: file.name,
+        type: file.mimeType || 'application/pdf',
       } as any);
 
       const response = await api.post('/reports/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+        headers: { Accept: 'application/json' },
       });
 
-      setStatus('analyzing');
-      pollTaskStatus(response.data.task_id);
+      await pollTaskStatus(response.data.task_id, file.name, uploadStartedAt);
     } catch (err: any) {
-      console.error('Upload Error:', err);
       setStatus('error');
-      setErrorMsg(err.response?.data?.detail || 'Failed to upload.');
+      setErrorMsg(err?.response
+        ? formatApiError(err, 'Failed to upload the PDF. Check your connection and try again.')
+        : err instanceof Error ? err.message : 'Failed to upload the PDF. Check your connection and try again.');
     }
   };
 
@@ -128,7 +184,7 @@ export default function ReportAnalyserScreen() {
     <SafeAreaView style={styles.container} edges={['bottom']}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         <Text style={styles.title}>Report Analyser</Text>
-        <Text style={styles.subtitle}>Upload your medical report (PDF) to get a simplified AI summary.</Text>
+        <Text style={styles.subtitle}>Upload a text-based PDF for local extraction preview. AI interpretation is unavailable until the backend is explicitly configured.</Text>
 
         {/* Upload Section */}
         <View style={styles.uploadSection}>
@@ -156,7 +212,7 @@ export default function ReportAnalyserScreen() {
             ) : (
               <>
                 <Ionicons name="cloud-upload-outline" size={20} color={COLORS.white} />
-                <Text style={styles.uploadButtonText}>Analyze Report</Text>
+              <Text style={styles.uploadButtonText}>Extract PDF Text</Text>
               </>
             )}
           </TouchableOpacity>
@@ -166,9 +222,9 @@ export default function ReportAnalyserScreen() {
         {status === 'analyzing' && (
           <View style={styles.statusCard}>
             <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.statusTitle}>Analyzing your report...</Text>
+            <Text style={styles.statusTitle}>Processing your report...</Text>
             <Text style={styles.statusSubtitle}>
-              We are extracting text, identifying medical entities, and generating a summary.
+              Extracting PDF text and saving your preview. AI interpretation is not being run in local mode.
             </Text>
           </View>
         )}
@@ -187,7 +243,7 @@ export default function ReportAnalyserScreen() {
             {/* Summary Card */}
             <View style={styles.summaryCard}>
               <View style={styles.cardHeader}>
-                <Ionicons name="sparkles" size={20} color={COLORS.primary} />
+                <Ionicons name={analysisResult.analysis_mode === 'ai_analysis' ? 'sparkles' : 'document-text'} size={20} color={COLORS.primary} />
                 <Text style={styles.cardTitle}>AI Summary</Text>
               </View>
               <Markdown
@@ -201,11 +257,26 @@ export default function ReportAnalyserScreen() {
                   paragraph: { marginVertical: 4 },
                 }}
               >
-                {analysisResult.simple_summary}
+                {analysisResult.simple_summary || 'AI interpretation is unavailable. Extracted PDF text is shown separately below.'}
               </Markdown>
             </View>
 
-            {/* Entities Card */}
+            <View style={styles.entitiesCard}>
+              <Text style={styles.cardTitle}>Extracted PDF text</Text>
+              {textPreviewLoading ? (
+                <ActivityIndicator color={COLORS.primary} />
+              ) : extractedText ? (
+                <Text selectable style={styles.extractedText}>{extractedText}</Text>
+              ) : (
+                <Text style={styles.noDataText}>{textPreviewMessage || 'No extracted text was returned with this report. This does not indicate whether AI summary generation succeeded.'}</Text>
+              )}
+              {analysisResult.analysis_mode === 'local_extraction_preview' && (
+                <Text style={styles.noDataText}>AI interpretation is unavailable in local extraction mode.</Text>
+              )}
+            </View>
+
+            {/* AI-derived entities are shown only for a verified AI result. */}
+            {analysisResult.analysis_mode === 'ai_analysis' && <>
             <View style={styles.entitiesCard}>
               <View style={styles.cardHeader}>
                 <Ionicons name="search" size={20} color={COLORS.primary} />
@@ -244,6 +315,7 @@ export default function ReportAnalyserScreen() {
                 <Text style={styles.noDataText}>No specific entities detected.</Text>
               )}
             </View>
+            </>}
           </View>
         )}
 
@@ -253,7 +325,7 @@ export default function ReportAnalyserScreen() {
             <Text style={styles.infoTitle}>Privacy & Tips</Text>
             <View style={styles.infoItem}>
               <Ionicons name="shield-checkmark-outline" size={18} color={COLORS.primary} />
-              <Text style={styles.infoText}>Your report is processed securely using our Healthcare AI pipeline.</Text>
+              <Text style={styles.infoText}>Text-based PDFs are extracted locally. No medical interpretation is generated in local mode.</Text>
             </View>
             <View style={styles.infoItem}>
               <Ionicons name="document-outline" size={18} color={COLORS.primary} />
@@ -442,6 +514,11 @@ const styles = StyleSheet.create({
     fontSize: moderateScale(SIZES.small),
     textAlign: 'center',
     paddingVertical: moderateScale(16),
+  },
+  extractedText: {
+    color: COLORS.text,
+    fontSize: moderateScale(SIZES.small),
+    lineHeight: moderateScale(21),
   },
   infoCard: {
     backgroundColor: COLORS.surface,

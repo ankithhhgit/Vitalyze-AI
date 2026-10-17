@@ -43,7 +43,7 @@ export default function HomeScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
+    <SafeAreaView style={styles.container} edges={['bottom']}>
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
@@ -67,7 +67,7 @@ export default function HomeScreen() {
         <View style={styles.heroSection}>
           <Text style={styles.heroTitle}>Welcome to Vitalyze</Text>
           <Text style={styles.heroSubtitle}>
-            Upload your medical prescription and instantly find the nearest medical stores.
+            Extract text from a PDF report locally, manage reminders, and open a separate pharmacy search.
             {'\n\n'}
             Smart, fast, and reliable healthcare at your fingertips.
           </Text>
@@ -80,17 +80,17 @@ export default function HomeScreen() {
             <FeatureCard
               icon="document-text-outline"
               title="Easy Prescription Upload"
-              description="Simply upload your prescription and let us do the rest with our AI-powered analyser."
+              description="Extract text locally. AI interpretation requires backend provider configuration."
             />
             <FeatureCard
               icon="location-outline"
               title="Nearest Medical Stores"
-              description="Locate trusted pharmacies near you within seconds and get your medicines hassle-free."
+              description="Pharmacy results require Maps configuration; a separate Google Maps search is available."
             />
             <FeatureCard
               icon="chatbubbles-outline"
               title="Integrated Chatbot"
-              description="Have questions? Our chatbot provides instant assistance 24/7."
+              description="The assistant requires backend AI configuration and does not generate offline answers."
             />
           </View>
         </View>

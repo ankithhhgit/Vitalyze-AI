@@ -1,6 +1,6 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
 import * as SecureStore from 'expo-secure-store';
-import { authService } from '../services/api';
+import { authService, setUnauthorizedHandler } from '../services/api';
 
 interface User {
   loggedIn: boolean;
@@ -31,11 +31,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     checkAuth();
   }, []);
 
+  const handleUnauthorized = useCallback(async () => {
+    setUser(null);
+  }, []);
+
+  useEffect(() => {
+    setUnauthorizedHandler(handleUnauthorized);
+    return () => setUnauthorizedHandler(undefined);
+  }, [handleUnauthorized]);
+
   const checkAuth = async () => {
     try {
       const token = await SecureStore.getItemAsync('access_token');
       if (token) {
-        setUser({ loggedIn: true });
+        // Keep the app behind the loading guard until the stored token is checked.
+        try {
+          const profile = await authService.getCurrentUser();
+          setUser({ loggedIn: true, phone: profile.phone_number });
+        } catch (error: any) {
+          if (error?.response?.status !== 401) {
+            // A temporary network/server failure does not invalidate a stored token.
+            setUser({ loggedIn: true });
+          }
+        }
       }
     } catch (error) {
       console.error('Auth check error:', error);
@@ -64,8 +82,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
-    await SecureStore.deleteItemAsync('access_token');
-    await SecureStore.deleteItemAsync('user_id');
+    await Promise.allSettled([
+      SecureStore.deleteItemAsync('access_token'),
+      SecureStore.deleteItemAsync('user_id'),
+    ]);
     setUser(null);
   };
 

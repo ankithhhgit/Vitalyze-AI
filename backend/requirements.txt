@@ -16,7 +16,7 @@ pandas
 pytesseract
 pdf2image
 opencv-python-headless
-googlemaps
 google-api-python-client 
 google-auth
 google-cloud-aiplatform
+google-genai

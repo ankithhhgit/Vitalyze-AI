@@ -1,12 +1,12 @@
+import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from pydantic import field_validator
-import logging
-import vertexai
-from vertexai.generative_models import GenerativeModel
-from google.oauth2 import service_account  # <--- IMPORT THIS
-from app.core.config import settings
-import os
+
+from app.services import gemini_service
+from app.api.v1.endpoints.auth import get_current_user
+from app.models.user import UserInDB
+from fastapi import Depends
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -23,34 +23,32 @@ class ChatRequest(BaseModel):
 
 def get_chat_model():
     """
-    Helper to initialize the model with explicit credentials.
+    Return the configured Gemini Developer API model handle.
+
+    Uses GEMINI_API_KEY (Google AI Studio) instead of Vertex AI service-account
+    credentials. Raises GeminiConfigurationError when the backend key is absent.
     """
-    # 1. Check if file exists to give a clear error if missing
-    if not os.path.exists(settings.GOOGLE_APPLICATION_CREDENTIALS):
-        raise FileNotFoundError(f"Credential file not found at: {settings.GOOGLE_APPLICATION_CREDENTIALS}")
-
-    # 2. Load the credentials from the JSON file
-    my_credentials = service_account.Credentials.from_service_account_file(
-        settings.GOOGLE_APPLICATION_CREDENTIALS
-    )
-
-    # 3. Initialize Vertex AI with these credentials
-    vertexai.init(
-        project=settings.GCP_PROJECT_ID, 
-        location=settings.GCP_LOCATION, 
-        credentials=my_credentials
-    )
-    
-    return GenerativeModel("gemini-2.5-pro")
+    return gemini_service.get_text_model()
 
 @router.post("/", response_model=dict)
-async def chat_with_medical_assistant(request: ChatRequest):
+async def chat_with_medical_assistant(
+    request: ChatRequest,
+    current_user: UserInDB = Depends(get_current_user),
+):
     """
     Feature #4: AI Chatbot for medical queries.
     """
     try:
-        # Initialize model inside the request to ensure creds are loaded
+        # Model/credential initialization failures indicate unavailable local config.
         model = get_chat_model()
+    except Exception as exc:
+        logger.error("Chat provider initialization failed (%s).", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="The healthcare assistant is not configured on the backend.",
+        ) from None
+
+    try:
         
         system_instruction = (
             "You are Vitalyze AI, a helpful and empathetic medical assistant. "
@@ -64,6 +62,8 @@ async def chat_with_medical_assistant(request: ChatRequest):
         full_prompt = f"{system_instruction}\n\nUser: {request.message}\nAssistant:"
         
         response = model.generate_content(full_prompt)
+        if not isinstance(response.text, str) or not response.text.strip():
+            raise ValueError("Provider returned an empty response")
         return {"response": response.text}
         
     except Exception as exc:

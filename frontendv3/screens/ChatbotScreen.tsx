@@ -14,6 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import Markdown from 'react-native-markdown-display';
 import { Ionicons } from '@expo/vector-icons';
 import api from '../services/api';
+import { formatApiError } from '../services/api';
 import { COLORS, SIZES, moderateScale } from '../constants/theme';
 
 interface Message {
@@ -27,7 +28,7 @@ export default function ChatbotScreen() {
     {
       id: '1',
       from: 'bot',
-      text: 'Hi, I am **Vitalyze AI**. I can answer your medical questions. How can I help you today?',
+    text: '**AI responses require backend provider configuration.** No offline or mock medical answers are generated.',
     },
   ]);
   const [input, setInput] = useState('');
@@ -57,6 +58,9 @@ export default function ChatbotScreen() {
     try {
       const response = await api.post('/chat/', { message: trimmed });
       const botReply = response.data.response;
+      if (typeof botReply !== 'string' || !botReply.trim()) {
+        throw new Error('The assistant returned an invalid response.');
+      }
 
       const botMessage: Message = {
         id: (Date.now() + 1).toString(),
@@ -66,11 +70,18 @@ export default function ChatbotScreen() {
 
       setMessages((prev) => [...prev, botMessage]);
     } catch (err) {
-      console.error('Chat Error:', err);
+      const status = (err as any)?.response?.status;
+      const message = status === 503
+        ? 'AI responses require backend provider configuration. No medical response was generated.'
+        : status === 502
+          ? 'The AI provider is temporarily unavailable. Please try again later.'
+          : status === 401
+            ? 'Your session expired. Sign in again to continue.'
+            : formatApiError(err, 'Could not reach the healthcare assistant. Check your connection and try again.');
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         from: 'bot',
-        text: "Sorry, I'm having trouble connecting to the server right now. Please try again later.",
+        text: message,
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {

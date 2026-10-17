@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -7,25 +7,94 @@ import {
   StyleSheet,
   ScrollView,
   ActivityIndicator,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import api from '../services/api';
+import { formatApiError } from '../services/api';
+import * as Notifications from 'expo-notifications';
+import { ensureNotificationPermission, reconcileLocalDailySchedule } from '../services/localReminderNotifications.mjs';
 import { COLORS, SIZES, moderateScale } from '../constants/theme';
 
 type TabType = 'daily' | 'refill';
-type TimingType = 'morning' | 'afternoon' | 'evening';
+type TimingType = '10:00' | '14:00' | '21:00';
+const DAILY_TIMES: TimingType[] = ['10:00', '14:00', '21:00'];
+interface SavedReminder {
+  id?: string;
+  _id?: string;
+  medicine_name: string;
+  times?: TimingType[];
+  timezone?: string;
+  local_notifications_enabled?: boolean;
+  whatsapp_opt_in?: boolean;
+  is_active?: boolean;
+  refill_date?: string;
+  kind?: 'Daily' | 'Refill';
+}
 
 export default function RemindersScreen() {
   const [activeTab, setActiveTab] = useState<TabType>('daily');
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
   const [msgType, setMsgType] = useState<'success' | 'error'>('success');
+  const [savedReminders, setSavedReminders] = useState<SavedReminder[]>([]);
+  const [listLoading, setListLoading] = useState(true);
+  const [deliveryMessage, setDeliveryMessage] = useState('WhatsApp delivery is disabled; saved reminders are not sent.');
+  const [notificationState, setNotificationState] = useState('Permission not requested');
+  const [selectedTimes, setSelectedTimes] = useState<TimingType[]>([...DAILY_TIMES]);
+  const [localNotificationsEnabled, setLocalNotificationsEnabled] = useState(true);
+  const [whatsappOptIn, setWhatsappOptIn] = useState(false);
+
+  const loadReminders = async () => {
+    setListLoading(true);
+    let dailyReminders: SavedReminder[] = [];
+    let refillReminders: SavedReminder[] = [];
+    try {
+      const response = await api.get('/reminders');
+      dailyReminders = response.data.daily_reminders || [];
+      refillReminders = response.data.refill_reminders || [];
+      setSavedReminders([
+        ...dailyReminders.map((item) => ({ ...item, kind: 'Daily' as const })),
+        ...refillReminders.map((item) => ({ ...item, kind: 'Refill' as const })),
+      ]);
+    } catch (err) {
+      setMsg(formatApiError(err, 'Could not load your saved reminders.'));
+      setMsgType('error');
+      setListLoading(false);
+      return;
+    }
+    try {
+      const status = await api.get('/reminders/status');
+      setDeliveryMessage(status.data.message || 'WhatsApp delivery is not configured.');
+    } catch {
+      setDeliveryMessage('WhatsApp delivery status is unavailable. Saving a reminder does not confirm delivery.');
+    }
+    try {
+      const permission = await Notifications.getPermissionsAsync();
+      const allowed = permission.granted || permission.status === 'granted';
+      setNotificationState(allowed ? 'Permission granted' : permission.status === 'denied' ? 'Permission denied' : 'Permission not requested');
+      const count = await reconcileLocalDailySchedule(
+        allowed ? [...dailyReminders, ...refillReminders] : [],
+        Notifications,
+      );
+      if (allowed) {
+        setNotificationState(`Scheduled ${count} local notification${count === 1 ? '' : 's'}`);
+      }
+    } catch {
+      setNotificationState('Local notification scheduling failed');
+      setMsg('Reminders loaded, but local notification synchronization failed. Review notification permission and try again.');
+      setMsgType('error');
+    } finally {
+      setListLoading(false);
+    }
+  };
+
+  useEffect(() => { loadReminders(); }, []);
 
   // Daily Reminder State
   const [dailyForm, setDailyForm] = useState({
     medicine_name: '',
-    timings: [] as TimingType[],
   });
 
   // Refill Reminder State
@@ -35,21 +104,17 @@ export default function RemindersScreen() {
     frequency_per_day: '1',
   });
 
-  const handleTimingChange = (timing: TimingType) => {
-    setDailyForm((prev) => {
-      const exists = prev.timings.includes(timing);
-      if (exists) {
-        return { ...prev, timings: prev.timings.filter((t) => t !== timing) };
-      }
-      return { ...prev, timings: [...prev.timings, timing] };
-    });
+  const handleTimingChange = (time: TimingType) => {
+    setSelectedTimes((previous) => previous.includes(time)
+      ? previous.filter((item) => item !== time)
+      : [...previous, time].sort());
   };
 
   const handleDailySubmit = async () => {
     setLoading(true);
     setMsg('');
 
-    if (!dailyForm.medicine_name || dailyForm.timings.length === 0) {
+    if (!dailyForm.medicine_name.trim() || selectedTimes.length === 0) {
       setMsg('Please fill medicine name and select at least one timing.');
       setMsgType('error');
       setLoading(false);
@@ -57,13 +122,30 @@ export default function RemindersScreen() {
     }
 
     try {
-      await api.post('/reminders/daily', dailyForm);
-      setMsg('Daily reminder set successfully!');
+      let permissionGranted = true;
+      if (localNotificationsEnabled) {
+        permissionGranted = await ensureNotificationPermission(Notifications);
+        setNotificationState(permissionGranted ? 'Permission granted' : 'Permission denied');
+      }
+      await api.post('/reminders/daily', {
+        ...dailyForm,
+        medicine_name: dailyForm.medicine_name.trim(),
+        timings: [],
+        times: selectedTimes,
+        timezone: 'Asia/Kolkata',
+        local_notifications_enabled: localNotificationsEnabled,
+        whatsapp_opt_in: whatsappOptIn,
+      });
       setMsgType('success');
-      setDailyForm({ medicine_name: '', timings: [] });
+      await loadReminders();
+      setMsg(permissionGranted || !localNotificationsEnabled
+        ? 'Reminder preferences saved. Local schedule reconciled; WhatsApp delivery is not confirmed.'
+        : 'Reminder saved. Local notifications are not scheduled because permission was denied; enable them in iPhone Settings. WhatsApp was not sent.');
+      setDailyForm({ medicine_name: '' });
+      setSelectedTimes([...DAILY_TIMES]);
+      setWhatsappOptIn(false);
     } catch (err: any) {
-      console.error(err);
-      const errorDetail = err.response?.data?.detail || 'Failed to set reminder. Are you logged in?';
+      const errorDetail = formatApiError(err, 'Failed to set reminder. Please try again.');
       setMsg(errorDetail);
       setMsgType('error');
     } finally {
@@ -75,8 +157,10 @@ export default function RemindersScreen() {
     setLoading(true);
     setMsg('');
 
-    if (!refillForm.medicine_name) {
-      setMsg('Please enter medicine name.');
+    const initialQuantity = Number(refillForm.initial_quantity);
+    const frequencyPerDay = Number(refillForm.frequency_per_day);
+    if (!refillForm.medicine_name.trim() || !Number.isInteger(initialQuantity) || initialQuantity <= 0 || !Number.isInteger(frequencyPerDay) || frequencyPerDay <= 0) {
+      setMsg('Enter a medicine name and positive whole-number quantities.');
       setMsgType('error');
       setLoading(false);
       return;
@@ -84,22 +168,32 @@ export default function RemindersScreen() {
 
     try {
       const payload = {
-        medicine_name: refillForm.medicine_name,
-        initial_quantity: parseInt(refillForm.initial_quantity) || 10,
-        frequency_per_day: parseInt(refillForm.frequency_per_day) || 1,
+        medicine_name: refillForm.medicine_name.trim(),
+        initial_quantity: initialQuantity,
+        frequency_per_day: frequencyPerDay,
+        whatsapp_opt_in: whatsappOptIn,
+        local_notifications_enabled: localNotificationsEnabled,
       };
 
+      let permissionGranted = true;
+      if (localNotificationsEnabled) {
+        permissionGranted = await ensureNotificationPermission(Notifications);
+        setNotificationState(permissionGranted ? 'Permission granted' : 'Permission denied');
+      }
       const response = await api.post('/reminders/refill', payload);
       const dateStr = response.data.refill_date
         ? new Date(response.data.refill_date).toLocaleDateString()
         : 'soon';
 
-      setMsg(`Refill reminder set! Next refill date: ${dateStr}`);
+      setMsg(permissionGranted || !localNotificationsEnabled
+        ? `Refill reminder saved for ${dateStr}. Local schedule synchronized; WhatsApp delivery is not confirmed.`
+        : `Refill reminder saved for ${dateStr}. Local notification permission was denied; enable it in device settings. WhatsApp was not sent.`);
       setMsgType('success');
       setRefillForm({ medicine_name: '', initial_quantity: '10', frequency_per_day: '1' });
+      setWhatsappOptIn(false);
+      await loadReminders();
     } catch (err: any) {
-      console.error(err);
-      const errorDetail = err.response?.data?.detail || 'Failed to set refill reminder.';
+      const errorDetail = formatApiError(err, 'Failed to set refill reminder. Please try again.');
       setMsg(errorDetail);
       setMsgType('error');
     } finally {
@@ -107,7 +201,47 @@ export default function RemindersScreen() {
     }
   };
 
-  const timings: TimingType[] = ['morning', 'afternoon', 'evening'];
+  const updateSavedReminder = async (reminder: SavedReminder, values: Partial<SavedReminder>) => {
+    const id = reminder.id ?? reminder._id;
+    if (!id) return;
+    try {
+      if (reminder.kind === 'Refill') {
+        await api.patch(`/reminders/refill/${id}`, {
+          local_notifications_enabled: values.local_notifications_enabled ?? reminder.local_notifications_enabled ?? true,
+          whatsapp_opt_in: values.whatsapp_opt_in ?? reminder.whatsapp_opt_in ?? false,
+          is_active: values.is_active ?? reminder.is_active ?? true,
+        });
+      } else {
+        await api.patch(`/reminders/daily/${id}`, {
+          times: values.times ?? reminder.times ?? [],
+          timezone: values.timezone ?? reminder.timezone ?? 'Asia/Kolkata',
+          local_notifications_enabled: values.local_notifications_enabled ?? reminder.local_notifications_enabled ?? true,
+          whatsapp_opt_in: values.whatsapp_opt_in ?? reminder.whatsapp_opt_in ?? false,
+          is_active: values.is_active ?? reminder.is_active ?? true,
+        });
+      }
+      setMsg('Reminder preferences saved. WhatsApp delivery is not confirmed.');
+      setMsgType('success');
+      await loadReminders();
+    } catch (err) {
+      setMsg(formatApiError(err, 'Could not update reminder preferences.'));
+      setMsgType('error');
+    }
+  };
+
+  const deleteSavedReminder = async (reminder: SavedReminder) => {
+    const id = reminder.id ?? reminder._id;
+    if (!id) return;
+    try {
+      await api.delete(`/reminders/${reminder.kind === 'Refill' ? 'refill' : 'daily'}/${id}`);
+      setMsg('Reminder deleted. Its local notifications were removed during schedule sync.');
+      setMsgType('success');
+      await loadReminders();
+    } catch (err) {
+      setMsg(formatApiError(err, 'Could not delete reminder.'));
+      setMsgType('error');
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
@@ -158,6 +292,66 @@ export default function RemindersScreen() {
           </View>
         ) : null}
 
+        <View style={styles.formCard}>
+          <Text style={styles.label}>Saved reminders</Text>
+          <Text style={styles.helperText}>{deliveryMessage}</Text>
+          <Text style={styles.helperText}>Local notification status: {notificationState}</Text>
+          {notificationState === 'Permission denied' && (
+            <TouchableOpacity onPress={() => Linking.openSettings()}>
+              <Text style={styles.linkText}>Open device settings</Text>
+            </TouchableOpacity>
+          )}
+          {listLoading ? <ActivityIndicator color={COLORS.primary} /> : savedReminders.length === 0 ? (
+            <Text style={styles.emptyText}>No reminders saved yet.</Text>
+          ) : savedReminders.map((reminder, index) => {
+            const isDaily = reminder.kind === 'Daily';
+            const times = reminder.times || [];
+            return (
+              <View key={reminder.id ?? reminder._id ?? `${reminder.medicine_name}-${index}`} style={styles.savedReminder}>
+                <Text style={styles.savedReminderText}>
+                  {reminder.kind || 'Reminder'} · {reminder.medicine_name}
+                  {isDaily ? ` · ${times.join(', ') || 'no times enabled'} · ${reminder.timezone || 'Asia/Kolkata'}` : ''}
+                  {reminder.refill_date ? ` · refill ${new Date(reminder.refill_date).toLocaleDateString()}` : ''}
+                </Text>
+                {isDaily && (
+                  <>
+                    <View style={styles.checkboxGroup}>
+                      {DAILY_TIMES.map((time) => (
+                        <TouchableOpacity
+                          key={time}
+                          accessibilityRole="checkbox"
+                          accessibilityState={{ checked: times.includes(time) }}
+                          style={styles.checkbox}
+                          onPress={() => updateSavedReminder(reminder, {
+                            times: times.includes(time) ? times.filter((item) => item !== time) : [...times, time].sort(),
+                          })}
+                        >
+                          <Ionicons name={times.includes(time) ? 'checkbox' : 'square-outline'} size={20} color={COLORS.primary} />
+                          <Text style={styles.checkboxLabel}>{time}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </>
+                )}
+                <View style={styles.manageRow}>
+                  <TouchableOpacity onPress={() => updateSavedReminder(reminder, { is_active: reminder.is_active === false })}>
+                    <Text style={styles.linkText}>{reminder.is_active === false ? 'Enable' : 'Disable'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => updateSavedReminder(reminder, { local_notifications_enabled: !reminder.local_notifications_enabled })}>
+                    <Text style={styles.linkText}>{reminder.local_notifications_enabled === false ? 'Enable local alerts' : 'Disable local alerts'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => updateSavedReminder(reminder, { whatsapp_opt_in: !reminder.whatsapp_opt_in })}>
+                    <Text style={styles.linkText}>{reminder.whatsapp_opt_in ? 'Revoke WhatsApp consent' : 'Opt in to WhatsApp'}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => deleteSavedReminder(reminder)}>
+                    <Text style={styles.dangerText}>Delete</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })}
+        </View>
+
         {/* Daily Form */}
         {activeTab === 'daily' && (
           <View style={styles.formCard}>
@@ -173,34 +367,46 @@ export default function RemindersScreen() {
             </View>
 
             <View style={styles.inputGroup}>
-              <Text style={styles.label}>Select Timings</Text>
+              <Text style={styles.label}>Daily times · Asia/Kolkata</Text>
               <View style={styles.checkboxGroup}>
-                {timings.map((timing) => (
+                {DAILY_TIMES.map((timing) => (
                   <TouchableOpacity
                     key={timing}
                     style={[
                       styles.checkbox,
-                      dailyForm.timings.includes(timing) && styles.checkboxSelected,
+                      selectedTimes.includes(timing) && styles.checkboxSelected,
                     ]}
                     onPress={() => handleTimingChange(timing)}
                   >
                     <Ionicons
-                      name={dailyForm.timings.includes(timing) ? 'checkbox' : 'square-outline'}
+                      name={selectedTimes.includes(timing) ? 'checkbox' : 'square-outline'}
                       size={22}
-                      color={dailyForm.timings.includes(timing) ? COLORS.primary : COLORS.textSecondary}
+                      color={selectedTimes.includes(timing) ? COLORS.primary : COLORS.textSecondary}
                     />
-                    <Text
-                      style={[
-                        styles.checkboxLabel,
-                        dailyForm.timings.includes(timing) && styles.checkboxLabelSelected,
-                      ]}
-                    >
-                      {timing.charAt(0).toUpperCase() + timing.slice(1)}
-                    </Text>
+                    <Text style={[styles.checkboxLabel, selectedTimes.includes(timing) && styles.checkboxLabelSelected]}>{timing}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
             </View>
+
+            <TouchableOpacity style={styles.preferenceRow} onPress={async () => {
+              if (localNotificationsEnabled) {
+                setLocalNotificationsEnabled(false);
+                return;
+              }
+              const granted = await ensureNotificationPermission(Notifications);
+              setNotificationState(granted ? 'Permission granted' : 'Permission denied');
+              if (granted) setLocalNotificationsEnabled(true);
+              else setMsg('Notification permission was denied. Enable it in device settings to use local reminders.');
+            }}>
+              <Ionicons name={localNotificationsEnabled ? 'checkbox' : 'square-outline'} size={22} color={COLORS.primary} />
+              <Text style={styles.checkboxLabel}>Use local notification fallback</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.preferenceRow} onPress={() => setWhatsappOptIn((value) => !value)}>
+              <Ionicons name={whatsappOptIn ? 'checkbox' : 'square-outline'} size={22} color={COLORS.primary} />
+              <Text style={styles.checkboxLabel}>I explicitly opt in to WhatsApp reminders to my account phone</Text>
+            </TouchableOpacity>
+            <Text style={styles.helperText}>WhatsApp stays disabled until the server, approved template, phone verification, and consent are ready.</Text>
 
             <TouchableOpacity
               style={[styles.submitButton, loading && styles.buttonDisabled]}
@@ -222,6 +428,23 @@ export default function RemindersScreen() {
         {/* Refill Form */}
         {activeTab === 'refill' && (
           <View style={styles.formCard}>
+            <TouchableOpacity style={styles.preferenceRow} onPress={async () => {
+              if (localNotificationsEnabled) {
+                setLocalNotificationsEnabled(false);
+                return;
+              }
+              const granted = await ensureNotificationPermission(Notifications);
+              setNotificationState(granted ? 'Permission granted' : 'Permission denied');
+              if (granted) setLocalNotificationsEnabled(true);
+              else setMsg('Notification permission was denied. Enable it in device settings to use local reminders.');
+            }}>
+              <Ionicons name={localNotificationsEnabled ? 'checkbox' : 'square-outline'} size={22} color={COLORS.primary} />
+              <Text style={styles.checkboxLabel}>Use local notification fallback</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.preferenceRow} onPress={() => setWhatsappOptIn((value) => !value)}>
+              <Ionicons name={whatsappOptIn ? 'checkbox' : 'square-outline'} size={22} color={COLORS.primary} />
+              <Text style={styles.checkboxLabel}>I explicitly opt in to WhatsApp refill reminders</Text>
+            </TouchableOpacity>
             <View style={styles.inputGroup}>
               <Text style={styles.label}>Medicine Name</Text>
               <TextInput
@@ -352,6 +575,48 @@ const styles = StyleSheet.create({
     padding: moderateScale(SIZES.padding),
     borderWidth: 1,
     borderColor: COLORS.border,
+  },
+  emptyText: {
+    color: COLORS.textSecondary,
+    fontSize: moderateScale(SIZES.small),
+  },
+  savedReminderText: {
+    color: COLORS.text,
+    fontSize: moderateScale(SIZES.small),
+    paddingVertical: moderateScale(6),
+  },
+  savedReminder: {
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingVertical: moderateScale(8),
+  },
+  helperText: {
+    color: COLORS.textSecondary,
+    fontSize: moderateScale(SIZES.caption),
+    marginBottom: moderateScale(8),
+    lineHeight: moderateScale(18),
+  },
+  linkText: {
+    color: COLORS.primary,
+    fontSize: moderateScale(SIZES.caption),
+    paddingVertical: moderateScale(6),
+  },
+  dangerText: {
+    color: COLORS.error,
+    fontSize: moderateScale(SIZES.caption),
+    paddingVertical: moderateScale(6),
+  },
+  manageRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    gap: moderateScale(8),
+  },
+  preferenceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: moderateScale(8),
   },
   inputGroup: {
     marginBottom: moderateScale(16),

@@ -5,7 +5,8 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, Pressable, View } from 'react-native';
+import * as Notifications from 'expo-notifications';
 
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { COLORS } from './constants/theme';
@@ -19,6 +20,16 @@ import RemindersScreen from './screens/RemindersScreen';
 import ReportAnalyserScreen from './screens/ReportAnalyserScreen';
 import MedicalLocatorScreen from './screens/MedicalLocatorScreen';
 import TrendScreen from './screens/TrendScreen';
+import ProfileScreen from './screens/ProfileScreen';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: false,
+    shouldSetBadge: false,
+  }),
+});
 
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -75,7 +86,25 @@ function MainTabs() {
         },
       })}
     >
-      <Tab.Screen name="Home" component={HomeScreen} options={{ headerShown: false }} />
+      <Tab.Screen
+        name="Home"
+        component={HomeScreen}
+        options={({ navigation }) => ({
+          title: 'Vitalyze.ai',
+          headerShown: true,
+          headerLeft: () => (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open profile"
+              hitSlop={10}
+              onPress={() => navigation.getParent()?.navigate('Profile' as never)}
+              style={{ paddingRight: 18 }}
+            >
+              <Ionicons name="person-circle-outline" size={28} color={COLORS.text} />
+            </Pressable>
+          ),
+        })}
+      />
       <Tab.Screen name="Analyser" component={ReportAnalyserScreen} />
       <Tab.Screen name="Reminders" component={RemindersScreen} />
       <Tab.Screen name="Chatbot" component={ChatbotScreen} />
@@ -111,21 +140,17 @@ function Navigation() {
         },
       }}
     >
-      <Stack.Screen
-        name="MainTabs"
-        component={MainTabs}
-        options={{ headerShown: false }}
-      />
-      <Stack.Screen
-        name="SignIn"
-        component={SignInScreen}
-        options={{ title: 'Sign In' }}
-      />
-      <Stack.Screen
-        name="Register"
-        component={RegisterScreen}
-        options={{ title: 'Create Account' }}
-      />
+      {user?.loggedIn ? (
+        <>
+          <Stack.Screen name="MainTabs" component={MainTabs} options={{ headerShown: false }} />
+          <Stack.Screen name="Profile" component={ProfileScreen} options={{ title: 'My Profile' }} />
+        </>
+      ) : (
+        <>
+          <Stack.Screen name="SignIn" component={SignInScreen} options={{ title: 'Sign In' }} />
+          <Stack.Screen name="Register" component={RegisterScreen} options={{ title: 'Create Account' }} />
+        </>
+      )}
     </Stack.Navigator>
   );
 }
