@@ -1,22 +1,18 @@
 from fastapi import APIRouter, Depends, HTTPException
-from motor.motor_asyncio import AsyncIOMotorDatabase
-from typing import Optional
 
-from app.db.mongodb import get_database
-from app.crud import crud_user
-from app.models.user import UserInDB
+from app.models.user import UserInDB, UserPublic
+from app.api.v1.endpoints.auth import get_current_user
 
 router = APIRouter()
 
-@router.get("/{user_id}", response_model=UserInDB)
+@router.get("/{user_id}", response_model=UserPublic)
 async def read_user_by_id(
     user_id: str,
-    db: AsyncIOMotorDatabase = Depends(get_database)
+    current_user: UserInDB = Depends(get_current_user),
 ):
     """
-    Retrieve a user by their ID.
+    Retrieve the authenticated user's own profile.
     """
-    user = await crud_user.get_user_by_id(db, user_id=user_id)
-    if not user:
+    if str(current_user.id) != user_id:
         raise HTTPException(status_code=404, detail="User not found")
-    return user
+    return current_user

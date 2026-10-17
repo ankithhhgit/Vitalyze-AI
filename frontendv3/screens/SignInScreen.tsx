@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
+import { formatApiError, isE164PhoneNumber, normalizePhoneNumber } from '../services/api';
 import { COLORS, SIZES, moderateScale } from '../constants/theme';
 
 export default function SignInScreen() {
@@ -28,19 +29,22 @@ export default function SignInScreen() {
     setError('');
     setLoading(true);
 
-    if (!phone || !password) {
+    const normalizedPhone = normalizePhoneNumber(phone);
+    if (!normalizedPhone || !password) {
       setError('Please enter both phone number and password.');
+      setLoading(false);
+      return;
+    }
+    if (!isE164PhoneNumber(normalizedPhone)) {
+      setError('Enter your phone in international format, for example +91 98765 43210.');
       setLoading(false);
       return;
     }
 
     try {
-      await login(phone, password);
-      navigation.navigate('MainTabs');
+      await login(normalizedPhone, password);
     } catch (err: any) {
-      console.error('Login Error:', err);
-      const msg = err.response?.data?.detail || 'Invalid Credentials. Please try again.';
-      setError(msg);
+      setError(formatApiError(err, 'Sign in failed. Check your phone number and password.'));
     } finally {
       setLoading(false);
     }
@@ -64,7 +68,7 @@ export default function SignInScreen() {
             <Text style={styles.label}>Phone Number</Text>
             <TextInput
               style={styles.input}
-              placeholder="Enter your phone number"
+              placeholder="+91 98765 43210"
               placeholderTextColor={COLORS.textMuted}
               value={phone}
               onChangeText={setPhone}

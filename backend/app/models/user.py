@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field, GetCoreSchemaHandler
 from pydantic_core import core_schema
 from typing import Optional, List, Literal, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from bson import ObjectId
 
 class PyObjectId(ObjectId):
@@ -36,7 +36,15 @@ class TokenData(BaseModel):
 class DailyReminder(BaseModel):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     medicine_name: str
-    timings: List[Literal["morning", "afternoon", "evening"]]
+    # `timings` remains for existing documents and older API clients.
+    timings: List[Literal["morning", "afternoon", "evening"]] = Field(default_factory=list)
+    times: List[str] = Field(default_factory=list)
+    timezone: str = "Asia/Kolkata"
+    local_notifications_enabled: bool = True
+    whatsapp_opt_in: bool = False
+    whatsapp_opt_in_at: Optional[datetime] = None
+    telegram_opt_in: bool = False
+    telegram_opt_in_at: Optional[datetime] = None
     is_active: bool = True
 
 class RefillReminder(BaseModel):
@@ -44,9 +52,12 @@ class RefillReminder(BaseModel):
     medicine_name: str
     initial_quantity: int
     frequency_per_day: int
-    start_date: datetime = Field(default_factory=datetime.now)
+    start_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     refill_date: datetime
     celery_task_id: str
+    local_notifications_enabled: bool = True
+    whatsapp_opt_in: bool = False
+    whatsapp_opt_in_at: Optional[datetime] = None
     is_active: bool = True
 
 class UserBase(BaseModel):
@@ -61,7 +72,27 @@ class UserCreate(UserBase):
 class UserInDB(UserBase):
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     hashed_password: str
+    phone_verified: bool = False
+    # Telegram chat binding. The chat id is set only by the inbound webhook
+    # after a one-time linking code is redeemed from the owner's own chat.
+    telegram_chat_id: Optional[str] = None
+    telegram_linked_at: Optional[datetime] = None
+    telegram_username: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.now)
+    daily_reminders: List[DailyReminder] = []
+    refill_reminders: List[RefillReminder] = []
+
+    class Config:
+        json_encoders = {ObjectId: str}
+        arbitrary_types_allowed = True
+
+
+class UserPublic(UserBase):
+    """Fields that may be returned when a user reads their own profile."""
+
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    created_at: datetime = Field(default_factory=datetime.now)
+    phone_verified: bool = False
     daily_reminders: List[DailyReminder] = []
     refill_reminders: List[RefillReminder] = []
 

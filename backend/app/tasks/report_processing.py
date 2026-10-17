@@ -7,22 +7,24 @@ import numpy as np
 import pytesseract
 import fitz  # PyMuPDF
 import asyncio
+import shutil
 from pdf2image import convert_from_path
 from typing import List, Dict, Any, Union, Optional
-
-from google.oauth2 import service_account
-import vertexai
-from vertexai.generative_models import GenerativeModel
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from .celery_app import celery
 from app.core.config import settings
+from app.services import gemini_service
 from app.models.report import ReportCreate
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 custom_config = r'--psm 6'
+
+
+class ReportExtractionError(ValueError):
+    """A safe, user-actionable failure while extracting a PDF locally."""
 
 # --- PDF & Image Processing Utilities (Unchanged) ---
 
@@ -64,29 +66,37 @@ def extract_text(processed_image: np.ndarray) -> str:
     return pytesseract.image_to_string(processed_image, lang="eng", config=custom_config)
 
 def extract_text_from_pdf(file_path: str) -> str:
-    text = ""
     try:
-        logger.info(f"Attempting direct text extraction for {file_path}...")
         with fitz.open(file_path) as doc:
-            for page in doc:
-                text += page.get_text()
-        
-        if len(text.strip()) < 50:
-            logger.info("Text too short. Likely scanned. Switching to OCR.")
-            raise ValueError("Likely Scanned PDF")
-    except Exception:
-        logger.info(f"Running Tesseract OCR pipeline on {file_path}")
-        full_ocr_text = []
-        try:
-            cv2_images = pdf_to_cv2_objects(file_path, dpi=300)
-            for i, image in enumerate(cv2_images):
-                processed_image = preprocessor(image)
-                page_text = extract_text(processed_image)
-                full_ocr_text.append(page_text)
-            text = "\n".join(full_ocr_text)
-        except Exception as e:
-            logger.error(f"OCR extraction failed: {e}")
-            raise e
+            if not doc.page_count:
+                raise ReportExtractionError("The PDF contains no pages.")
+            text = "\n".join(page.get_text() for page in doc).strip()
+            if text:
+                return text
+            has_images = any(page.get_images(full=True) for page in doc)
+    except ReportExtractionError:
+        raise
+    except Exception as exc:
+        logger.warning("PDF could not be opened (%s).", type(exc).__name__)
+        raise ReportExtractionError("This file is not a readable PDF. Please select a valid PDF.") from None
+
+    if not has_images:
+        raise ReportExtractionError("This PDF contains no extractable text or scanned page images.")
+    if not shutil.which("tesseract") or not shutil.which("pdftoppm"):
+        raise ReportExtractionError(
+            "This appears to be a scanned PDF. Local OCR is unavailable; install Tesseract and Poppler, or use a text-based PDF."
+        )
+
+    try:
+        cv2_images = pdf_to_cv2_objects(file_path, dpi=300)
+        text = "\n".join(
+            extract_text(preprocessor(image)) for image in cv2_images
+        ).strip()
+    except Exception as exc:
+        logger.warning("Scanned PDF OCR failed (%s).", type(exc).__name__)
+        raise ReportExtractionError("Local OCR could not read this scanned PDF.") from None
+    if not text:
+        raise ReportExtractionError("No text could be recognized in this scanned PDF.")
     return text
 
 
@@ -94,23 +104,9 @@ def extract_text_from_pdf(file_path: str) -> str:
 
 def extract_vitals_with_gemini(full_text: str) -> List[Dict[str, str]]:
     """
-    Uses Vertex AI (Gemini) to extract structured key-value pairs.
+    Uses the Gemini Developer API to extract structured key-value pairs.
     """
-    try:
-        creds = service_account.Credentials.from_service_account_file(
-            settings.GOOGLE_APPLICATION_CREDENTIALS
-        )
-        
-        vertexai.init(
-            project=settings.GCP_PROJECT_ID, 
-            location=settings.GCP_LOCATION, 
-            credentials=creds
-        )
-        
-        model = GenerativeModel("gemini-2.5-pro")
-        
-        # We ask Gemini to output strict JSON
-        prompt = f"""
+    prompt = f"""
         You are an expert medical data extractor. 
         Analyze the following medical report text and extract the medical test results.
 
@@ -132,40 +128,27 @@ def extract_vitals_with_gemini(full_text: str) -> List[Dict[str, str]]:
         ]
         """
 
+    try:
         logger.info("Asking Gemini to extract structured vitals...")
-        response = model.generate_content(prompt)
-        
-        # Clean the response to ensure it's valid JSON (Gemini sometimes adds ```json markers)
-        raw_response = response.text.strip()
+        raw_response = gemini_service.generate_json(prompt)
+
+        # Fallback fence-stripping in case the provider ignores JSON mode.
         clean_json = raw_response.replace("```json", "").replace("```", "").strip()
-        
         extracted_data = json.loads(clean_json)
+        if not isinstance(extracted_data, list):
+            raise ValueError("Gemini vitals output was not a JSON array")
         return extracted_data
 
-    except Exception as e:
-        logger.error(f"Gemini Extraction failed: {e}")
-        # Return empty list so the app doesn't crash
-        return []
+    except Exception as exc:
+        logger.error("Gemini extraction failed (%s).", type(exc).__name__)
+        raise RuntimeError("AI report interpretation failed") from None
 
 
 def generate_summary_with_gemini(entities: List[Dict], full_text: str) -> str:
     """
-    Summarization Step (Uses the same model configuration)
+    Summarization Step (Uses the same Gemini Developer API configuration)
     """
-    try:
-        creds = service_account.Credentials.from_service_account_file(
-            settings.GOOGLE_APPLICATION_CREDENTIALS
-        )
-        
-        vertexai.init(
-            project=settings.GCP_PROJECT_ID, 
-            location=settings.GCP_LOCATION, 
-            credentials=creds
-        )
-        
-        model = GenerativeModel("gemini-2.5-pro")
-        
-        prompt = f"""
+    prompt = f"""
         You are a helpful medical assistant using Vitalyze.ai. 
         
         Based on these extracted test results:
@@ -181,19 +164,18 @@ def generate_summary_with_gemini(entities: List[Dict], full_text: str) -> str:
         4. End with a disclaimer that you are an AI.
         """
 
-        response = model.generate_content(prompt)
-        return response.text
-
-    except Exception as e:
-        logger.error(f"Gemini Summary failed: {e}")
-        return "Unable to generate AI summary at this time."
+    try:
+        return gemini_service.generate_text(prompt)
+    except Exception as exc:
+        logger.error("Gemini summary failed (%s).", type(exc).__name__)
+        raise RuntimeError("AI report summary generation failed") from None
 
 
 # --- Celery Tasks ---
 
 @celery.task(bind=True)
 def task_extract_data_from_pdf(self, file_path: str) -> Dict[str, Any]:
-    logger.info(f"Starting data extraction for: {file_path}")
+    logger.info("Starting local PDF text extraction.")
     try:
         extracted_text = extract_text_from_pdf(file_path)
         if os.path.exists(file_path):
@@ -207,7 +189,7 @@ def task_extract_data_from_pdf(self, file_path: str) -> Dict[str, Any]:
 
 @celery.task(bind=True)
 def task_run_ai_analysis(self, extraction_result: Union[Dict, str], user_id: str, filename: str, gcs_path: Optional[str] = None):
-    logger.info(f"Starting AI analysis for User: {user_id}")
+    logger.info("Starting report interpretation and persistence.")
     
     text_to_analyze = ""
     if isinstance(extraction_result, dict):
@@ -215,20 +197,40 @@ def task_run_ai_analysis(self, extraction_result: Union[Dict, str], user_id: str
     else:
         text_to_analyze = str(extraction_result)
 
-    if not text_to_analyze:
-        return {"error": "No text provided"}
+    if not text_to_analyze.strip():
+        raise RuntimeError("Report extraction produced no text")
 
-    # --- STEP 1: Extract Clean Data using Gemini ---
-    # We replaced the Regex/Google NLP with this single intelligent call.
-    vital_indicators = extract_vitals_with_gemini(text_to_analyze)
-    
-    # --- STEP 2: Generate Summary based on that data ---
-    simple_summary = generate_summary_with_gemini(vital_indicators, text_to_analyze)
+    # Prefer an explicit process environment value (runbook exports), otherwise
+    # fall back to backend settings loaded from .env.
+    analysis_mode = (
+        os.getenv("REPORT_ANALYSIS_MODE") or settings.REPORT_ANALYSIS_MODE or "local"
+    ).strip().lower()
+    ai_configured = bool(
+        analysis_mode == "ai"
+        and gemini_service.is_configured()
+    )
+    if ai_configured:
+        vital_indicators = extract_vitals_with_gemini(text_to_analyze)
+        if not isinstance(vital_indicators, list) or not vital_indicators:
+            raise RuntimeError("AI report interpretation returned no structured findings")
+        simple_summary = generate_summary_with_gemini(vital_indicators, text_to_analyze)
+        if not isinstance(simple_summary, str) or not simple_summary.strip() or simple_summary.startswith("Unable to"):
+            raise RuntimeError("AI report summary was unavailable")
+        analysis_mode = "ai_analysis"
+    else:
+        # Keep the credential-free route explicit. No values or diagnoses are inferred locally.
+        vital_indicators = []
+        simple_summary = (
+            "LOCAL EXTRACTION PREVIEW — AI interpretation is unavailable until the backend "
+            "is configured. This screen shows extracted PDF text only; it does not provide "
+            "medical findings or advice."
+        )
+        analysis_mode = "local_extraction_preview"
     
     # 3. Save to DB
     async def save_to_db():
+        client = AsyncIOMotorClient(settings.MONGO_URI)
         try:
-            client = AsyncIOMotorClient(settings.MONGO_URI)
             db = client[settings.MONGO_DB_NAME]
             
             report_in = ReportCreate(
@@ -241,26 +243,28 @@ def task_run_ai_analysis(self, extraction_result: Union[Dict, str], user_id: str
                 file_storage_path=gcs_path
             )
             
-            await db["reports"].insert_one(report_in.model_dump(by_alias=True, exclude=["id"]))
+            result = await db["reports"].insert_one(report_in.model_dump(by_alias=True, exclude=["id"]))
+            return str(result.inserted_id)
+        finally:
             client.close()
-            return True
-        except Exception as db_err:
-            logger.error(f"Database Save Failed: {db_err}")
-            return False
 
+    loop = asyncio.new_event_loop()
     try:
-        loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(save_to_db())
+        report_id = loop.run_until_complete(save_to_db())
+    except Exception as exc:
+        logger.error("Failed to persist processed report (%s).", type(exc).__name__)
+        raise RuntimeError("Report processing failed") from None
+    finally:
         loop.close()
-    except Exception as e:
-        logger.error(f"Async Loop Failed: {e}")
+        asyncio.set_event_loop(None)
 
     # Return structure matching what your frontend expects
     return {
         "status": "COMPLETED",
-        # We populate both keys with the clean data to ensure frontend compatibility
+        "analysis_mode": analysis_mode,
+        "report_id": report_id,
         "structured_entities": vital_indicators,
         "vital_indicators": vital_indicators,
-        "simple_summary": simple_summary
+        "simple_summary": simple_summary,
     }

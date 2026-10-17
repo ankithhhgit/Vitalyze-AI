@@ -14,6 +14,7 @@ import {
 import { useNavigation } from '@react-navigation/native';
 import { Picker } from '@react-native-picker/picker';
 import { useAuth } from '../context/AuthContext';
+import { formatApiError, isE164PhoneNumber, normalizePhoneNumber } from '../services/api';
 import { COLORS, SIZES, moderateScale } from '../constants/theme';
 
 export default function RegisterScreen() {
@@ -35,27 +36,38 @@ export default function RegisterScreen() {
   };
 
   const handleSubmit = async () => {
+    if (loading) return;
     setError('');
-    setLoading(true);
 
-    if (!phone || !formData.password || !formData.name) {
+    if (!phone.trim() || !formData.password || !formData.name.trim()) {
       setError('Please fill in all required fields.');
-      setLoading(false);
+      return;
+    }
+
+    const normalizedPhone = normalizePhoneNumber(phone);
+    if (!isE164PhoneNumber(normalizedPhone)) {
+      setError('Enter your phone in international format, for example +91 98765 43210.');
       return;
     }
 
     if (formData.password.length < 8) {
       setError('Password must be at least 8 characters.');
-      setLoading(false);
       return;
     }
 
+    const age = formData.age.trim() ? Number(formData.age) : null;
+    if (age !== null && (!Number.isInteger(age) || age <= 0)) {
+      setError('Age must be a positive whole number.');
+      return;
+    }
+
+    setLoading(true);
     try {
       const payload = {
-        name: formData.name,
-        phone_number: phone,
+        name: formData.name.trim(),
+        phone_number: normalizedPhone,
         password: formData.password,
-        age: formData.age ? parseInt(formData.age) : null,
+        age,
         gender: formData.gender,
       };
 
@@ -64,9 +76,7 @@ export default function RegisterScreen() {
         { text: 'OK', onPress: () => navigation.navigate('SignIn') },
       ]);
     } catch (err: any) {
-      console.error('Registration Error:', err);
-      const msg = err.response?.data?.detail || 'Registration failed. Try again.';
-      setError(msg);
+      setError(formatApiError(err, 'Registration failed. Check your details and try again.'));
     } finally {
       setLoading(false);
     }
@@ -101,7 +111,7 @@ export default function RegisterScreen() {
             <Text style={styles.label}>Phone Number *</Text>
             <TextInput
               style={styles.input}
-              placeholder="Enter your phone number"
+              placeholder="+91 98765 43210"
               placeholderTextColor={COLORS.textMuted}
               value={phone}
               onChangeText={setPhone}

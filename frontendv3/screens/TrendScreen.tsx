@@ -6,12 +6,14 @@ import {
   ScrollView,
   ActivityIndicator,
   Dimensions,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LineChart } from 'react-native-gifted-charts';
 import { Picker } from '@react-native-picker/picker';
 import { Ionicons } from '@expo/vector-icons';
 import api from '../services/api';
+import { formatApiError } from '../services/api';
 import { COLORS, SIZES, moderateScale } from '../constants/theme';
 
 const screenWidth = Dimensions.get('window').width;
@@ -30,6 +32,7 @@ const metricOptions: MetricOption[] = [
   { value: 'platelet', name: 'Platelet Count', keywords: ['platelet', 'plt'] },
   { value: 'creatinine', name: 'Creatinine', keywords: ['creatinine', 'creat'] },
 ];
+const DEFAULT_METRIC = metricOptions[0].value;
 
 interface DataPoint {
   timestamp: number;
@@ -42,36 +45,39 @@ export default function TrendScreen() {
   const [data, setData] = useState<DataPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [selectedMetric, setSelectedMetric] = useState('bp');
+  const [selectedMetric, setSelectedMetric] = useState(DEFAULT_METRIC);
+  const activeMetric = metricOptions.some((metric) => metric.value === selectedMetric)
+    ? selectedMetric
+    : DEFAULT_METRIC;
 
   const findValueInEntities = (entities: any[], keywords: string[]): number | null => {
     if (!entities || !Array.isArray(entities)) return null;
 
     const match = entities.find((e) => {
-      const textToSearch = (e.Indicator || e.Description || '').toLowerCase();
+      const textToSearch = String(e?.Indicator || e?.Description || '').toLowerCase();
       return keywords.some((k) => textToSearch.includes(k));
     });
 
     if (match) {
-      const valueString = match.Value || match.Description || '';
-      const numMatch = valueString.match(/(\d+(\.\d+)?)/);
+      const valueString = String(match.Value ?? match.value ?? '');
+      const numMatch = valueString.match(/-?\d+(\.\d+)?/);
       return numMatch ? parseFloat(numMatch[0]) : null;
     }
     return null;
   };
 
   const processReportsData = (reports: any[]): DataPoint[] => {
-    const sortedReports = reports.sort(
-      (a, b) => new Date(a.upload_date).getTime() - new Date(b.upload_date).getTime()
-    );
+    const sortedReports = [...reports]
+      .filter((report) => Number.isFinite(new Date(report.upload_date).getTime()))
+      .sort((a, b) => new Date(a.upload_date).getTime() - new Date(b.upload_date).getTime());
 
-    return sortedReports.map((report, index) => {
+    return sortedReports.map((report) => {
       const dateObj = new Date(report.upload_date);
 
       const dataPoint: DataPoint = {
-        timestamp: dateObj.getTime() + index,
-        displayDate: dateObj.toLocaleDateString(),
-        fileName: report.filename,
+        timestamp: dateObj.getTime(),
+        displayDate: new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' }).format(dateObj),
+        fileName: report.filename || 'Report',
       };
 
       metricOptions.forEach((metric) => {
@@ -89,12 +95,8 @@ export default function TrendScreen() {
         const processed = processReportsData(response.data);
         setData(processed);
 
-        if (processed.length === 0) {
-          setError('No report history found. Upload a report to see trends!');
-        }
       } catch (err) {
-        console.error('Trend Fetch Error:', err);
-        setError('Failed to load health history. Please try again.');
+        setError(formatApiError(err, 'Failed to load health history. Please try again.'));
       } finally {
         setLoading(false);
       }
@@ -103,15 +105,15 @@ export default function TrendScreen() {
     fetchHistory();
   }, []);
 
-  const currentMetricName = metricOptions.find((m) => m.value === selectedMetric)?.name || '';
+  const currentMetricName = metricOptions.find((m) => m.value === activeMetric)?.name || 'Select an indicator';
 
   // Prepare chart data
   const chartData = data
-    .filter((d) => d[selectedMetric] !== null)
+    .filter((d) => d[activeMetric] !== null)
     .map((d, index) => ({
-      value: d[selectedMetric] as number,
-      label: d.displayDate.split('/').slice(0, 2).join('/'),
-      dataPointText: d[selectedMetric]?.toString(),
+      value: d[activeMetric] as number,
+      label: d.displayDate,
+      dataPointText: d[activeMetric]?.toString(),
     }));
 
   const dataPointsCount = chartData.length;
@@ -127,9 +129,12 @@ export default function TrendScreen() {
           <Text style={styles.controlLabel}>Track Indicator:</Text>
           <View style={styles.pickerContainer}>
             <Picker
-              selectedValue={selectedMetric}
-              onValueChange={(value) => setSelectedMetric(value)}
-              style={styles.picker}
+              selectedValue={activeMetric}
+              onValueChange={(value) => {
+                if (metricOptions.some((metric) => metric.value === value)) setSelectedMetric(value);
+              }}
+              style={[styles.picker, { height: Platform.OS === 'ios' ? 150 : 50 }]}
+              itemStyle={styles.pickerItem}
               dropdownIconColor={COLORS.text}
             >
               {metricOptions.map((opt) => (
@@ -150,6 +155,13 @@ export default function TrendScreen() {
           <View style={styles.errorCard}>
             <Ionicons name="alert-circle" size={24} color={COLORS.error} />
             <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+
+        {!loading && !error && data.length === 0 && (
+          <View style={styles.noChartData}>
+            <Ionicons name="document-text-outline" size={40} color={COLORS.textMuted} />
+            <Text style={styles.noChartText}>No report history yet. Upload a report to see trends.</Text>
           </View>
         )}
 
@@ -182,7 +194,7 @@ export default function TrendScreen() {
                     showVerticalLines
                     verticalLinesColor="rgba(48, 54, 61, 0.5)"
                     noOfSections={5}
-                    maxValue={Math.max(...chartData.map(d => d.value)) * 1.2}
+                    maxValue={Math.max(1, ...chartData.map(d => d.value)) * 1.2}
                     pointerConfig={{
                       pointerStripColor: COLORS.primary,
                       pointerStripWidth: 2,
@@ -288,6 +300,9 @@ const styles = StyleSheet.create({
   picker: {
     color: COLORS.text,
     height: 50,
+  },
+  pickerItem: {
+    color: COLORS.text,
   },
   loadingContainer: {
     paddingVertical: moderateScale(60),

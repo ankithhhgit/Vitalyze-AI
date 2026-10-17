@@ -6,7 +6,8 @@ from app.api.v1.endpoints import (
     reminders, 
     maps, 
     chat,       
-    medicines   
+    medicines,
+    webhooks
 )
 
 api_router = APIRouter()
@@ -18,3 +19,4 @@ api_router.include_router(reminders.router, prefix="/reminders", tags=["reminder
 api_router.include_router(maps.router, prefix="/maps", tags=["maps"])
 api_router.include_router(chat.router, prefix="/chat", tags=["chat"])
 api_router.include_router(medicines.router, prefix="/medicines", tags=["medicines"])
+api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
